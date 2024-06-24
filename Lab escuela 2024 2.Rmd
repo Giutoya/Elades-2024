@@ -1,0 +1,386 @@
+---
+title: "Lab 2"
+output: html_document
+---
+
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  paged.print = F
+)
+```
+
+Paquetes requeridos:
+
+```{r setup}
+library(sfcr)
+library(tidyverse)
+```
+
+
+# Model REG
+
+
+# Modelo REG
+
+Comenzamos este cuaderno con el modelo **REG**, que representa a un país con dos regiones y una sola autoridad monetaria y fiscal. Este modelo se presenta en Godley y Lavoie (2007) [p. 171-187].
+
+Este modelo se basa en el modelo de PC, dividiendo su sector privado en dos entidades: "norte" y "sur".
+
+A partir de este modelo habrá una proliferación de subíndices y superíndices. Si no se indica lo contrario, intentaré seguir la convención a continuación al nombrar las variables:
+
+
+```{r, echo = F}
+tbl <- tribble(
+  ~"Variable name", ~"subscript", ~"_SUPERSCRIPT", ~"result",
+  "Y", "", "_N", "Y_N",
+  "B", "h", "_S", "Bh_S"
+)
+
+knitr::kable(tbl, format = "html") %>% kableExtra::kable_styling(full_width = F)
+```
+
+## Ecuaciones
+
+Como de costumbre, comenzamos anotando las ecuaciones, las variables exógenas y los parámetros:
+
+
+```{r}
+reg_eqs <- sfcr_set(
+  Y_N ~ C_N + G_N + X_N - IM_N,
+  Y_S ~ C_S + G_S + X_S - IM_S,
+  IM_N ~ mu_N * Y_N,
+  IM_S ~ mu_S * Y_S,
+  X_N ~ IM_S,
+  X_S ~ IM_N,
+  YD_N ~ Y_N - TX_N + r[-1] * Bh_N[-1],
+  YD_S ~ Y_S - TX_S + r[-1] * Bh_S[-1],
+  TX_N ~ theta * ( Y_N + r[-1] * Bh_N[-1] ),
+  TX_S ~ theta * ( Y_S + r[-1] * Bh_S[-1] ),
+  V_N ~ V_N[-1] + ( YD_N - C_N ),
+  V_S ~ V_S[-1] + ( YD_S - C_S ),
+  C_N ~ alpha1_N * YD_N + alpha2_N * V_N[-1],
+  C_S ~ alpha1_S * YD_S + alpha2_S * V_S[-1],
+  Hh_N ~ V_N - Bh_N,
+  Hh_S ~ V_S - Bh_S,
+  Bh_N ~ V_N * ( lambda0_N + lambda1_N * r - lambda2_N * ( YD_N/V_N ) ),
+  Bh_S ~ V_S * ( lambda0_S + lambda1_S * r - lambda2_S * ( YD_S/V_S ) ),
+  TX ~ TX_N + TX_S,
+  G ~ G_N + G_S,
+  Bh ~ Bh_N + Bh_S,
+  Hh ~ Hh_N + Hh_S,
+  Bs ~ Bs[-1] + ( G + r[-1] * Bs[-1] ) - ( TX + r[-1] * Bcb[-1] ),
+  Hs ~ Hs[-1] + Bcb - Bcb[-1],
+  Bcb ~ Bs - Bh
+)
+
+reg_ext <- sfcr_set(
+  r ~ 0.025,
+  G_S ~ 20,
+  G_N ~ 20,
+  mu_N ~ 0.15,
+  mu_S ~ 0.15,
+  alpha1_N ~ 0.7,
+  alpha1_S ~ 0.7,
+  alpha2_N ~ 0.3,
+  alpha2_S ~ 0.3,
+  lambda0_N ~ 0.67,
+  lambda0_S ~ 0.67,
+  lambda1_N ~ 0.05,
+  lambda1_S ~ 0.05,
+  lambda2_N ~ 0.01,
+  lambda2_S ~ 0.01,
+  theta ~ 0.2
+)
+
+```
+
+
+Ahora podemos simular el modelo, añadiendo también la ecuación oculta para detectar cualquier error en las ecuaciones^[Para entender la importancia del argumento 'oculto', invito al lector a cambiar la primera ecuación a `Y_N ~ C_N + G_N + X_N + IM_N`. Obviamente, eso es un error, ya que 'IM_N' debe deducirse del modelo. Sin embargo, es un error tipográfico fácil de cometer al copiar las ecuaciones del libro. El modelo se ejecutará y convergerá a las respuestas en cada período, pero tendrán poco sentido. Establecer la ecuación oculta arrojaría un error en su lugar, invitando al lector a volver a verificar las ecuaciones.]:
+
+```{r}
+reg <- sfcr_baseline(reg_eqs, reg_ext, 100, hidden = c("Hh" = "Hs"))
+```
+
+
+Comenzamos investigando algunos aspectos del estado estacionario (estacionario) del modelo REG.
+
+En primer lugar, calculamos la balanza comercial y el déficit público de cada región:
+
+
+```{r}
+reg <- reg %>%
+  mutate(TB_N = X_N - IM_N,
+         TB_S = X_S - IM_S,
+         GB_N = TX_N - (G_N + dplyr::lag(r) * dplyr::lag(Bh_N)),
+         GB_S = TX_S - (G_S + dplyr::lag(r) * dplyr::lag(Bh_S)))
+```
+
+
+As always, we reshape the model object to plot. I will also create an extra column `region` to indicate whether the variable relates to the `N` or `S` region. Global variables like `G` and `Hh` are classified as `NA` region.
+
+Para ello utilicé la función `case_when()` de `dplyr`, y busqué los componentes "_N" o "_S" en cada nombre de variable con la función `str_detect()` de `stringr.` Ambos paquetes forman parte de los paquetes `tidyverse`.
+
+Estas operaciones se "canalizan" en una sola llamada.
+
+
+```{r}
+reg_long <- reg %>%
+  pivot_longer(cols = -period) %>%
+  mutate(region = case_when(
+    str_detect(name, '_N') ~ "North",
+    str_detect(name, "_S") ~ "South",
+    # `T` means everything else inside
+    # the case_when function
+    T ~ NA_character_
+  ))
+```
+
+También crearé una función auxiliar que cree los balances, cambie la forma del modelo y agregue el grupo de regiones para evitar repetir este código para cada nuevo modelo:
+
+```{r}
+to_long <- function(model) {
+  model %>%
+    mutate(TB_N = X_N - IM_N,
+         TB_S = X_S - IM_S,
+         GB_N = TX_N - (G_N + dplyr::lag(r) * dplyr::lag(Bh_N)),
+         GB_S = TX_S - (G_S + dplyr::lag(r) * dplyr::lag(Bh_S)),
+         deltaV_N = V_N - lag(V_N),
+         deltaV_S = V_S - lag(V_S)) %>%
+    pivot_longer(cols = -period) %>%
+  mutate(region = case_when(
+    str_detect(name, '_N') ~ "North",
+    str_detect(name, "_S") ~ "South",
+    # `T` means everything else inside
+    # the case_when function
+    T ~ NA_character_
+  ))
+}
+```
+
+
+
+```{r}
+reg_long %>%
+  filter(name %in% c("GB_N", "GB_S", "TB_N", "TB_S")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name), size = 1, alpha = 0.5) +
+  facet_wrap(~region)
+```
+
+Con esta Figura observamos que el modelo está correctamente especificado ya que los balances sectoriales convergen a la igualdad como se esperaba de las ecuaciones 6.30 a 6.32 de Godley y Lavoie (2007) [p. 177]. A continuación reproduzco la ecuación 6.32, un resultado importante que se usará a menudo en este cuaderno^[Nótese también que escribí los balances en su forma estándar, es decir, llamé a la "balanza comercial" como exportaciones menos importaciones, y "balanza gubernamental" como impuestos menos gastos. Los resultados son los mismos porque deben converger a cero en un modelo especificado correctamente.]:
+
+$$
+G_T^N - T^N = IM^N - X^N
+$$
+
+Además, en este ejemplo, ambas regiones están exactamente equilibradas, con sus saldos sectoriales iguales a cero. Este es, como Godley y Lavoie (2007) [p. 179], un estado superestacionario que se logra porque todos los parámetros son los mismos para ambas regiones. No hay nada en el sistema que conduzca a este resultado. Se invita al lector a cambiar los parámetros por sí mismo para comprobar esta afirmación.
+
+## Matrices of model REG
+
+### Balance-sheet matrix
+
+```{r}
+bs_reg <- sfcr_matrix(
+  columns = c("North_HH", "South_HH", "Government", "Central Bank"),
+  codes = c("nh", "sh", "g", "cb"),
+  c("Money", nh = "+Hh_N", sh = "+Hh_S", cb = "-Hs"),
+  c("Bills", nh = "+Bh_N", sh = "+Bh_S", g = "-Bs", cb = "+Bcb"),
+  c("Wealth", nh = "-V_N", sh = "-V_S", g = "V_N + V_S")
+)
+```
+
+Validar:
+
+```{r}
+sfcr_validate(bs_reg, reg, "bs")
+```
+
+### Matriz de flujo de transacciones
+
+```{r}
+tfm_reg <- sfcr_matrix(
+  columns = c("North_HH", "North_Firms", "South_HH", "South_Firms", "Government", "Central Bank"),
+  codes = c("nh", "nf", "sh", "sf", "g", "cb"),
+  c("Consumption", nh = "-C_N", nf = "+C_N", sh = "-C_S", sf = "+C_S"),
+  c("Govt. Exp", nf = "+G_N", sf = "+G_S", g = "-G"),
+  c("North X to South", nf = "+X_N", sf = "-IM_S"),
+  c("South X to North", nf = "-IM_N", sf = "+X_S"),
+  c("GDP", nh = "+Y_N", nf = "-Y_N", sh = "+Y_S", sf = "-Y_S"),
+  c("Interest payments", nh = "+r[-1] * Bh_N[-1]", sh = "+r[-1] * Bh_S[-1]", g = "-r[-1] * Bs[-1]", cb = "+r[-1] * Bcb[-1]"),
+  c("CB Profits", g = "+r[-1] * Bcb[-1]", cb = "-r[-1] * Bcb[-1]"),
+  c("Taxes", nh = "-TX_N", sh = "-TX_S", g = "+TX"),
+  c("Ch. cash", nh = "-d(Hh_N)", sh = "-d(Hh_S)", cb = "+d(Hs)"),
+  c("Ch. bills", nh = "-d(Bh_N)", sh = "-d(Bh_S)", g = "+d(Bs)", cb = "-d(Bcb)")
+)
+```
+
+<!-- Validar: -->
+
+<!-- ```{r} -->
+<!-- sfcr_validate(tfm_reg, reg, "tfm") -->
+<!-- ``` -->
+
+<!-- ### Diagrama de Sankey -->
+
+<!-- ```{r} -->
+<!-- sfcr_sankey(tfm_reg, reg) -->
+<!-- ``` -->
+
+## Escenario 1: Aumento de la propensión a las importaciones del Sur
+
+Para ver qué pasaría si hubiera un aumento en la propensión a importar en la región sur, calculamos un escenario agregando un shock al modelo `reg`:
+
+```{r}
+shock1 <- sfcr_shock(
+  variables = sfcr_set(mu_S ~ 0.25),
+  start = 5,
+  end = 60
+)
+
+reg_1 <- sfcr_scenario(
+  reg,
+  scenario = shock1,
+  periods = 60
+)
+```
+
+
+Utilizo la función `to_long()` creada anteriormente para remodelar este modelo:
+
+```{r}
+reg_1long <- to_long(reg_1)
+```
+
+Y reproducir la figura 6.1 que describe lo que sucede con la variación de la riqueza de los hogares del Sur, el balance del gobierno con esta región y la balanza comercial de esta región:
+
+```{r}
+reg_1long %>%
+  filter(name %in% c("deltaV_S", "GB_S", "TB_S")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name))
+```
+
+¿Qué pasaría con el PIB de ambas regiones?
+
+
+```{r}
+reg_1long %>%
+  filter(name %in% c("Y_N", "Y_S")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name))
+```
+
+## Escenario 2: Un aumento en el gasto público del Sur
+
+Antes veíamos que un aumento exógeno de las importaciones del Sur **causaba** un mayor déficit público en esa región. ¿Qué pasaría si aumentamos exógenamente el déficit público?
+
+```{r}
+shock2 <- sfcr_shock(
+  variables = sfcr_set(G_S ~ 25),
+  start = 5,
+  end = 60
+)
+
+reg_2 <- sfcr_scenario(reg, shock2, 60)
+reg_2long <- to_long(reg_2)
+```
+
+
+```{r}
+reg_2long %>%
+  filter(name %in% c("Y_N", "Y_S")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name)) +
+  labs(title = "Impact on regrional GDPs")
+```
+
+```{r}
+reg_2long %>%
+  filter(name %in% c("deltaV_S", "TB_S", "GB_S")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name))
+```
+
+## Escenario 3: Aumento de la propensión al ahorro de los hogares del Sur
+
+Uno de los resultados desconcertantes del modelo de PC fue que un aumento en la propensión al ahorro condujo a un mayor rendimiento a largo plazo. Esto contrasta con la "paradoja del ahorro" postkeynesiana. ¿Qué pasaría en el modelo REG si los hogares de una de sus regiones aumentaran su propensión al ahorro?
+
+Para comprobarlo, añadimos un shock al modelo REG, creando un nuevo escenario:
+
+```{r}
+shock3 <- sfcr_shock(
+  variables = sfcr_set(alpha1_S ~ 0.6),
+  start = 5,
+  end = 60
+)
+
+reg_3 <- sfcr_scenario(reg, shock3, periods = 60)
+reg_3long <- to_long(reg_3)
+```
+
+Veamos qué pasó con el PIB de ambas regiones:
+
+```{r}
+reg_3long %>%
+  filter(name %in% c("Y_S", "Y_N")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name))
+```
+
+Una vez más, vemos que una mayor ahorratividad conduce a mayores niveles de producción en estado estacionario, aunque el efecto a corto plazo es marcadamente negativo.
+
+A continuación se visualiza la evolución de los saldos sectoriales y la riqueza de la región Sur:
+
+
+```{r}
+reg_3long %>%
+  filter(name %in% c("deltaV_S", "TB_S", "GB_S")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name))
+```
+
+La característica interesante de este ejercicio es que muestra que es posible tener déficits (o superávits) públicos al mismo tiempo que superávits comerciales (déficits), pero sólo en el período de transición hacia el nuevo estado estacionario.
+
+## Escenario 4: Un cambio en la preferencia de liquidez de los hogares del Sur
+
+El último ejercicio con este modelo consiste en comprobar el efecto de un aumento de la preferencia de liquidez de los hogares del Norte.
+
+```{r}
+shock4 <- sfcr_shock(
+  variables = sfcr_set(lambda0_S ~ 1),
+  start = 5,
+  end = 60
+)
+
+reg_4 <- sfcr_scenario(reg, shock4, 60)
+reg_4long <- to_long(reg_4)
+```
+
+
+```{r}
+reg_4long %>%
+  filter(name %in% c("Y_S", "Y_N")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name)) +
+  labs(title = "Effects on GDP")
+```
+
+```{r}
+reg_4long %>%
+  filter(name %in% c("deltaV_S", "TB_S", "GB_S")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name)) +
+  labs(title = "Effects on sectoral balances")
+```
+
+Como podemos ver, una disminución en la preferencia por la liquidez conduce a una mayor producción estacionaria en ambas regiones. El aumento de la riqueza en forma de bonos conduce a un mayor pago de intereses, lo que inicialmente aumenta el déficit público, pero este efecto desaparece cuando el consumo de la riqueza se recupera. La región Sur termina con un déficit gemelo.
+
+También cabe destacar que el tamaño de este efecto es bastante pequeño.
+
+
+# Referencias
+
+Godley, Wynne y Marc Lavoie. 2007. Economía monetaria: un enfoque integrado del crédito, el dinero, el ingreso, la producción y la riqueza. Palgrave Macmillan.

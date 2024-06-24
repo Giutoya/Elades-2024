@@ -1,0 +1,645 @@
+---
+title: "Lab 1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+# Modelo SIM estimado usando el paquete `sfcr` (Desarrollado por Joao Macalos)
+
+En este artículo mostramos cómo se puede utilizar el paquete sfcr para replicar el modelo SIM de Godley y Lavoie (2007 cap. 3).. Comenzamos cargando el paquete sfcr y los paquetes tidyverse, que se van a utilizar para manipular los datos y generar las gráficas:
+
+```{r}
+#install.packages("sfcr")
+#install.packages("tidyverse")
+library(sfcr)
+library(tidyverse)
+```
+
+## Ecuaciones
+
+El primer paso es anotar las ecuaciones, variables exógenas y parámetros:
+
+```{r}
+sim_eqs <- sfcr_set(
+  TXs ~ TXd,
+  YD ~ W * Ns - TXs,
+  Cd ~ alpha1 * YD + alpha2 * Hh[-1],
+  Hh ~ YD - Cd + Hh[-1],
+  Ns ~ Nd,
+  Nd ~ Y / W,
+  Cs ~ Cd,
+  Gs ~ Gd,
+  Y ~ Cs + Gs,
+  TXd ~ theta * W * Ns,
+  Hs ~ Gd - TXd + Hs[-1]
+)
+
+sim_ext <- sfcr_set(
+  Gd ~ 20,
+  W ~ 1,
+  alpha1 ~ 0.6,
+  alpha2 ~ 0.4,
+  theta ~ 0.2
+)
+
+```
+
+## Baseline
+
+Con estos objetos definidos, podemos simular el modelo SIM. Haremos que funcione durante 100 períodos. También definiremos la ecuación oculta de antemano, asegurándonos de que el modelo esté escrito correctamente:
+
+```{r}
+sim <- sfcr_baseline(
+  equations = sim_eqs, 
+  external = sim_ext, 
+  periods = 100, 
+  hidden = c("Hh" = "Hs"),
+  method = "Broyden")
+```
+
+NOTA:Los solucionadores de ecuaciones simultáneas ("Gauss", "Broyden" o "Newton") solo están llamados a resolver los valores de las variables cíclicas en el modelo. Podemos comprobar que el modelo genera los mismos resultados a largo plazo que el modelo presentado en la página 69 Godley y Lavoie (2007)..
+
+```{r}
+sim %>%
+  filter(period %in% c(1, 2, 3, 50)) %>%
+  select(period, Gs, Y, TXd, YD, Hs) %>%
+  t() %>%
+  round(digits = 0)
+```
+
+## Un aumento permanente en el gasto público
+
+¿Qué sucede si hay un aumento permanente en el gasto público? Para comprobarlo, necesitamos usar las funciones `sfcr_shock()` y `sfcr_scenario()`:
+
+```{r}
+shock1 <- sfcr_shock(
+  variables = list(
+    Gd ~ 25
+  ),
+  start = 5,
+  end = 50
+)
+
+sim2 <- sfcr_scenario(sim, shock1, 50)
+```
+
+Para visualizar las consecuencias del choque con el paquete `ggplot2`, primero debemos transformar el modelo en formato largo. Podemos hacerlo con la función `pivot_longer()` de `dplyr`. La sintaxis puede parecer complicada, pero en realidad es simple. Con la función `pivot_longer()` queremos transformar todas las columnas del objeto `sim2` en el formato largo, indexado por la columna de punto. Es por eso que en cols "eliminamos" la columna de periodo. Para trazar, filtramos el objeto `sim2_long` para mantener solo Y. Como podemos ver, un aumento en el gobierno conduce a un aumento en la producción a largo plazo.
+
+```{r}
+sim2_long <- sim2 %>%
+  pivot_longer(cols = -period)
+
+sim2_long %>%
+  filter(name == "Y") %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line()
+```
+
+Para trazar múltiples variables en la misma gráfica, necesitamos filtrar no para una variable específica, sino para un grupo de variables. Lo hacemos usando el operador R `%in%` en lugar de `==.` Veamos cómo trazar $YD$, $Cd$ y $Hh$
+
+```{r}
+sim2_long %>%
+  filter(name %in% c("YD", "Cd", "Hh")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name, color = name))
+```
+
+## SIMEX model
+
+El modelo SIMEX amplía el modelo SIM introduciendo expectativas en el modelo. Técnicamente, modifica una de las ecuaciones y añade dos nuevas ecuaciones. También usamos la función `sfcr_set()` para modificar un conjunto de ecuaciones. Para modificar una ecuación existente, debemos escribir su nueva versión y excluir la antigua del conjunto con el argumento exclude. Para encontrar el id correcto para excluir, podemos usar la función `sfcr_set_index()` y luego filtrar los lhs del conjunto original:
+
+```{r}
+sfcr_set_index(sim_eqs) %>%
+  filter(lhs == "Cd")
+
+simex_eqs <- sfcr_set(
+  sim_eqs,
+  Cd ~ alpha1 * YDE + alpha2 * Hh[-1],
+  Hd ~ Hd[-1] + YDE - Cd,
+  YDE ~ YD[-1],
+  exclude = 3
+)
+```
+
+Utilizamos estas nuevas ecuaciones para simular el modelo SIMEX:
+
+```{r}
+simex <- sfcr_baseline(simex_eqs, sim_ext, 50, hidden = c("Hh" = "Hs"))
+```
+
+Y inmediatamente agregue un choque a la propensión a consumir en este modelo:
+
+```{r}
+shock2 <- sfcr_shock(
+  variables = sfcr_set(alpha1 ~ 0.7),
+  start = 5,
+  end = 50
+)
+
+simex2 <- sfcr_scenario(simex, shock2, 50)
+```
+
+Luego terminamos este artículo trazando las consecuencias de un aumento en la propensión a consumir en el consumo, el ingreso disponible y la riqueza:
+
+```{r}
+simex2_long <- simex2 %>%
+  pivot_longer(cols = -period)
+
+simex2_long %>%
+  filter(name %in% c("Cd", "YD", "Hh")) %>%
+  ggplot(aes(x = period, y = value)) +
+  geom_line(aes(linetype = name))
+```
+
+Un lector atento notaría que la Figura anterior no es la misma que la Figura 3.8 de Godley y Lavoie (2007). Esto se debe a que la Figura 3.8 choca con el modelo SIM y no con el modelo SIMEX. Dejaré como ejercicio para que el lector genere la Figura 3.8.
+
+## Funcionalidades adicionales del paquete `sfcr`
+
+### Matrices del modelo SIM
+
+El paquete sfcr también proporciona funciones para escribir y validar las matrices de balance y flujo de transacciones de cualquier modelo SFC. Además, garantiza que el modelo sea consistente con el flujo de existencias. Aquí, las funciones principales son `sfcr_matrix()`, para escribir las matrices, y `sfcr_validate()`, para comprobar si la matriz es coherente con el modelo simulado. Sin embargo, la matriz de balance del modelo SIM es demasiado simple y no vale la pena presentarla aquí, ya que requeriría que creáramos dos variables adicionales que faltan variables: la riqueza de los hogares y la deuda pública. Estas entradas son importantes porque todas las columnas de la matriz del balance deben sumar a cero.
+
+```{r}
+tfm_sim <- sfcr_matrix(
+  columns = c("Households", "Firms", "Government"),
+  codes = c("h", "f", "g"),
+  c("Consumption", h = "-Cd", f = "+Cs"),
+  c("Govt. Exp.", f = "+Gs", g = "-Gd"),
+  c("Factor Income", h = "W * Ns", f = "-W * Ns"),
+  c("Taxes", h = "-TXs", g = "+TXd"),
+  c("Ch. Money", h = "-d(Hh)", g = "d(Hs)")
+)
+
+sfcr_validate(tfm_sim, sim, which = "tfm")
+```
+
+<!-- ### Diagrama de Sankey -->
+
+<!-- Otro beneficio de tener una matriz de flujo de transacciones que se valida en el modelo es que podemos construir con confianza una representación de Sankey de esta matriz con la función `sfcr_sankey()`: -->
+
+<!-- ```{r} -->
+<!-- sfcr_sankey(tfm_sim, sim) -->
+<!-- ``` -->
+
+### DAG: La estructura del modelo
+
+El paquete sfcr también proporciona una función incorporada para visualizar la representación DAG de las ecuaciones en el modelo: También es posible visualizar la estructura de bloques del modelo con la función `sfcr_dag_blocks_plot()`:
+
+```{r}
+sfcr_dag_cycles_plot(sim_eqs, size = 10)
+
+sfcr_dag_blocks_plot(sim_eqs)
+```
+
+
+# Modelo SIM estimado usando el paquete `bimets` ^[Para obtener información sobre "bimets", consulte: https://cran.r-project.org/web/packages/bimets/vignettes/bimets.pdf ; https://rstudio-pubs-static.s3.amazonaws.com/513407_05cc338d7e1d47548ebe30c5293f5fc1.html] ^[Último cambio: 23 de julio de 2022 ] ^[ Nota: este código replica y estima el modelo SIM desarrollado en "Economía Monetaria: Un enfoque integrado del crédito, el dinero, el ingreso, la producción y la riqueza", por Wynne Godley y Marc Lavoie, capítulo 3. Las series de tiempo simuladas se utilizan para estimar los coeficientes del modelo.]   
+
+
+## PARTE 1
+
+### A) PREPARAR EL AMBIENTE
+
+```{r}
+rm(list=ls(all=TRUE))
+```
+Subir datos simulados de Dropbox. En alternativa, cargue datos desde FRED.
+```{r}
+#Data <- read.csv( "https://www.dropbox.com/s/ggnhnxqhgfqwnmj/data_sim.csv?dl=1" ) 
+#install.packages("fredr") #si fredr no está instalado
+library(fredr)
+fredr_set_key("7515440bdb26ef51d98764cfbccff0b9")
+Data0 <-fredr(
+  series_id = "GDP",# Producto Interno Bruto  (https://fred.stlouisfed.org/series/GDP)
+  observation_start = as.Date("1960-01-01"),
+  observation_end = as.Date("2010-01-01"), 
+  frequency = "a", 
+  aggregation_method = "avg"
+)
+Data1 <-fredr(
+  series_id = "W068RCQ027SBEA",# Gastos totales del gobierno  (https://fred.stlouisfed.org/series/W068RCQ027SBEA)
+  observation_start = as.Date("1960-01-01"),
+  observation_end = as.Date("2010-01-01"), 
+  frequency = "a", 
+  aggregation_method = "avg"
+)
+Data2 <-fredr(
+  series_id = "PCE",# Gastos de Consumo Personal  (https://fred.stlouisfed.org/series/PCE)
+  observation_start = as.Date("1960-01-01"),
+  observation_end = as.Date("2010-01-01"), 
+  frequency = "a", 
+  aggregation_method = "avg"
+)
+Data3 <-fredr(
+  series_id = "BOGMBASE",# Base Monetaria; Total (https://fred.stlouisfed.org/series/BOGMBASE)
+  observation_start = as.Date("1960-01-01"),
+  observation_end = as.Date("2010-01-01"), 
+  frequency = "a", 
+  aggregation_method = "avg"
+)
+Data4 <-fredr(
+  series_id = "IITTRLB",# Impuesto sobre la Renta Individual de los Estados Unidos: Tasas impositivas para impuestos regulares: Tramo más bajo  (https://fred.stlouisfed.org/series/IITTRLB)
+  observation_start = as.Date("1960-01-01"),
+  observation_end = as.Date("2010-01-01"), 
+  frequency = "a", 
+  aggregation_method = "avg"
+)
+Data5 <-fredr(
+  series_id = "W006RC1Q027SBEA",# Recibos de impuestos corrientes del gobierno federal  (https://fred.stlouisfed.org/series/W006RC1Q027SBEA) 
+  observation_start = as.Date("1960-01-01"),
+  observation_end = as.Date("2010-01-01"), 
+  frequency = "a", 
+  aggregation_method = "avg"
+)
+Data6 <-fredr(
+  series_id = "A576RC1",#  Remuneración de empleados, recibida: Desembolsos salariales  (https://fred.stlouisfed.org/series/A576RC1)
+  observation_start = as.Date("1960-01-01"),
+  observation_end = as.Date("2010-01-01"), 
+  frequency = "a", 
+  aggregation_method = "avg"
+)
+Data7 <-fredr(
+  series_id = "PAYEMS",# Todos los empleados, Total no agrícola  (https://fred.stlouisfed.org/series/PAYEMS)
+  observation_start = as.Date("1960-01-01"),
+  observation_end = as.Date("2010-01-01"), 
+  frequency = "a", 
+  aggregation_method = "avg"
+)
+Data8 <-fredr(
+  series_id = "DSPI",# Ingreso Personal Disponible  (https://fred.stlouisfed.org/series/DSPI)
+  observation_start = as.Date("1960-01-01"),
+  observation_end = as.Date("2010-01-01"), 
+  frequency = "a", 
+  aggregation_method = "avg"
+)
+names(Data0)[names(Data0) == 'value'] <- 'Y'
+names(Data1)[names(Data1) == 'value'] <- 'G'
+names(Data2)[names(Data2) == 'value'] <- 'CO'
+names(Data3)[names(Data3) == 'value'] <- 'H'
+names(Data4)[names(Data4) == 'value'] <- 'theta' #In puntos porcentuales, debe transformarse
+names(Data5)[names(Data5) == 'value'] <- 'TAX'
+names(Data6)[names(Data6) == 'value'] <- 'w' #In puntos porcentuales, debe transformarse
+names(Data7)[names(Data7) == 'value'] <- 'N'
+names(Data8)[names(Data8) == 'value'] <- 'YD'
+
+
+Data0$Year<-format(Data0$date, "%Y")
+
+
+Dataa <- cbind.data.frame(Data0,
+                          Data1,
+                          Data2,
+                          Data3,
+                          Data4,
+                          Data5,
+                          Data6,
+                          Data7,
+                          Data8
+)
+
+Data <- subset(Dataa, select = c(Year,Y,G,CO,H,theta,TAX,w,N,YD))
+
+Data$theta <- Data$theta/100 
+Data$w <- Data$w/Data$N  
+
+rm("Data0", 
+   "Dataa",
+   "Data1",
+   "Data2",
+   "Data3",
+   "Data4",
+   "Data5",
+   "Data6",
+   "Data7",
+   "Data8")
+```
+Llamar paquete `bimets`
+
+```{r}
+#install.packages("bimets") #si bimets no está instalado
+library(bimets)
+```
+
+
+### B) ESTIMACIÓN BÁSICA
+
+Crear y describir el modelo SIM
+
+```{r}
+sim_model.txt="MODEL
+
+COMMENT> Función de consumo
+BEHAVIORAL> CO
+TSRANGE 1962 1 2010 1
+EQ> CO =  c1*YD + c2*TSLAG(H_H,1)  
+COEFF> c1 c2
+
+COMMENT> Producto
+IDENTITY> Y
+EQ> Y = CO + G
+
+COMMENT> Empleo
+IDENTITY> N
+EQ> N = Y/w
+
+COMMENT> Pagos de impuestos
+BEHAVIORAL> TAX
+TSRANGE 1962 1 2010 1
+EQ> TAX = theta*w*N
+COEFF> theta
+
+COMMENT> Ingreso disponible
+IDENTITY> YD
+EQ> YD = w*N - TAX
+
+COMMENT> Oferta de dinero
+IDENTITY> H_S
+EQ> H_S = TSLAG(H_S,1) + G - TAX
+
+COMMENT> Demanda de dinero
+IDENTITY> H_H
+EQ> H_H = TSLAG(H_H,1) + YD - CO
+
+END"
+```
+Subir el modelo
+
+```{r}
+sim_model=LOAD_MODEL(modelText = sim_model.txt);
+```
+
+Performar algunas comprobaciones:
+ - Recopilar la información sobre la ecuación de consumo
+```{r}
+sim_model$behaviorals$CO
+```
+ - Recopilar la información sobre la identidad del producto
+```{r}
+sim_model$identities$Y
+```
+ - Mostrar la matriz de cadenas ordenadas que contiene los nombres de las variables endógenas que deben calcularse secuencialmente durante cada iteración del algoritmo de simulación
+```{r}
+sim_model$vsim
+```
+ - Mostrar la matriz de cadenas ordenada que contiene los nombres de las variables pre-recursivas endógenas que deben calcularse (utilizando su definición `EQ>`) antes de que se lleve a cabo el algoritmo iterativo de simulación;
+```{r}
+sim_model$vpre
+```
+ - Mostrar la matriz de cadenas ordenadas que contiene los nombres de las variables de retroalimentación endógenas que se evaluarán para la convergencia durante el algoritmo iterativo de simulación;
+```{r}
+sim_model$vfeed
+```
+ - Mostrar la matriz de cadenas ordenadas que contiene los nombres de las variables post-recursivas endógenas que deben calcularse después de la ejecución y la convergencia del algoritmo iterativo;
+```{r}
+sim_model$post
+```
+Inserir valores para modelar variables y coeficientes
+```{r}
+sim_modelData=list(  
+  Y  = TIMESERIES(c(Data$Y),   
+                  START=c(1960,1),FREQ=1),
+  G  = TIMESERIES(c(Data$G),   
+                  START=c(1960,1),FREQ=1),
+  CO  = TIMESERIES(c(Data$CO),   
+                   START=c(1960,1),FREQ=1),
+  H_H  = TIMESERIES(c(Data$H),   
+                    START=c(1960,1),FREQ=1),
+  H_S  = TIMESERIES(c(Data$H),   
+                    START=c(1960,1),FREQ=1),
+  theta  = TIMESERIES(c(Data$theta),   
+                      START=c(1960,1),FREQ=1),
+  TAX  = TIMESERIES(c(Data$TAX),   
+                    START=c(1960,1),FREQ=1),
+  w  = TIMESERIES(c(Data$w),   
+                  START=c(1960,1),FREQ=1),
+  N  = TIMESERIES(c(Data$N),   
+                  START=c(1960,1),FREQ=1),
+  YD  = TIMESERIES(c(Data$YD),   
+                   START=c(1960,1),FREQ=1)
+)
+```
+Estimar los datos en el modelo
+```{r}
+sim_model=LOAD_MODEL_DATA(sim_model,sim_modelData);
+```
+Estimar coeficientes del modelo
+```{r}
+sim_model=ESTIMATE(sim_model)
+```
+Nota: use `ESTIMATE(sim_model, eqList=c('CO'))` para estimar solo coeficientes de consumo
+
+
+Nota: valores de coeficiente, residuales y estadísticas se almacenan en el objeto modelo
+
+Nota: la función de estimación incluye: a) OLS; b) Variables instrumentales;  c) Restricciones lineales deterministas sobre los coeficientes; d) Polinomio de Almon Retrasos distribuidos; e) Autocorrelación de los errores.
+
+
+
+
+### C) REALIZAR ALGUNAS COMPROBACIONES BÁSICAS
+
+Imprimir coeficientes de consumo estimados
+```{r}
+sim_model$behaviorals$CO$coefficients
+```
+Imprimir residuales del consumo
+```{r}
+sim_model$behaviorals$CO$residuals
+```
+Imprimir una selección de estadísticas de estimación para el consumo:
+ - Grados de libertad
+```{r}
+sim_model$behaviorals$CO$statistics$DegreesOfFreedom
+```
+ - Error estándar
+```{r}
+sim_model$behaviorals$CO$statistics$StandardErrorRegression
+```
+ - Covarianza
+```{r}
+sim_model$behaviorals$CO$statistics$CoeffCovariance
+```
+análisis  de estabilidad estructural:
+performar prueba de Chow (fallo predictivo) en la función de consumo
+```{r}
+sim_model_chow <- ESTIMATE(sim_model
+                           ,eqList='CO'
+                           ,TSRANGE=c(1961,1,2000,1)
+                           ,forceTSRANGE = TRUE
+                           ,CHOWTEST = TRUE
+)
+```
+
+#################################################
+
+### D) UTILIZAR EL MODELO PARA HACER PREDICCIONES
+
+ - Extender variables exógenas (y evaluadas condicionalmente) hasta 2030
+```{r}
+sim_model$modelData <- within(sim_model$modelData,{
+  G   = TSEXTEND(G,  UPTO=c(2030,1))
+  w   = TSEXTEND(w,  UPTO=c(2030,1))
+})             
+```
+ - Pronóstico
+```{r}
+sim_model <- SIMULATE(sim_model
+                      ,simType='FORECAST'
+                      ,TSRANGE=c(2011,1,2030,1)
+                      ,simConvergence=0.00001
+                      ,simIterLimit=100)
+```
+ - Imprimir pronóstico Y
+```{r}
+TABIT(sim_model$simulation$Y)
+```
+ - Imprimir CO pronosticado
+```{r}
+TABIT(sim_model$simulation$CO)
+```
+ - Gráfico Y real y pronosticado 
+```{r}
+plot(sim_modelData$Y, type="l",col=1,lwd = 2,lty=1,xlim=range(1960,2030),ylim=range(0,max(sim_model$simulation$Y)+3),font.main=1,cex.main=1,main="a) Out-of-sample forecast: output",ylab='$',cex.axis=1,cex.lab=1)
+lines(sim_model$simulation$Y,type="l",col="2",lwd = 2,lty=3)
+legend("topleft",c("Actual","Predicted"),bty="n",cex=1,lty=c(1,3),lwd=c(2,2),col=c(1,2),box.lty=0)
+```
+ - Traza el CO real y pronosticado
+```{r}
+plot(sim_modelData$CO, type="l",col=1,lwd = 2,lty=1,xlim=range(1960,2030),ylim=range(0,max(sim_model$simulation$CO)+3),font.main=1,cex.main=1,main="b) Out-of-sample forecast: consumption",ylab='$',cex.axis=1,cex.lab=1)
+lines(sim_model$simulation$CO,type="l",col="3",lwd = 2,lty=3)
+legend("topleft",c("Actual","Predicted"),bty="n",cex=1,lty=c(1,3),lwd=c(2,2),col=c(1,3),box.lty=0)
+```
+
+## PARTE 2
+
+
+### E) ESTIMACIÓN AVANZADA: UTILICE FACTORES DE ADICIÓN PARA AJUSTAR LAS PREDICCIONES EN LA MUESTRA
+
+Definir lista de exogenización (es decir, variables que se ajustan)
+```{r}
+exogenizeList <- list(
+  CO = c(1960,1,2010,1),      
+  TAX  = c(1960,1,2010,1))
+```
+Nota: use `CO = TRUE` para todo `TSRANGE`  
+
+Definir lista de factores añadidos
+```{r}
+constantAdjList <- list(
+  CO = TIMESERIES(START=c(1960,1), FREQ='A'),
+  TAX = TIMESERIES(START=c(1960,1), FREQ='A'),
+  Y  = TIMESERIES(START=c(1960,1), FREQ='A'))
+```
+Nota: use `CO = TIMESERIES(1,2,-1 START=c(1960,1), FREQ='A')` para agregar valores 1, 2 y -1 a `CO(1960)`, `CO(1961)` y `CO(1962)`, respectivamente 
+
+Simular modelo
+```{r}
+sim_model <- SIMULATE(sim_model
+                      ,simType='FORECAST'
+                      ,TSRANGE=c(1961,1,2030,1)
+                      ,simConvergence=0.00001
+                      ,simIterLimit=100
+                      ,Exogenize=exogenizeList
+                      ,ConstantAdjustment=constantAdjList
+                      ,quietly=TRUE)
+```
+Note: ESTÁTICA, DINÁMICA y otros tipos de simulación se pueden utilizar. Sin embargo, STATIC no habilita la previsión de valores fuera de la muestra
+
+Imprimir Y pronosticado
+```{r}
+TABIT(sim_model$simulation$Y)
+```
+Imprimir CO pronosticado
+```{r}
+TABIT(sim_model$simulation$CO)
+```
+Gráfico Y real y pronosticado 
+```{r}
+plot(sim_modelData$Y, type="l",col=1,lwd = 2,lty=1,xlim=range(1960,2030),ylim=range(0,max(sim_model$simulation$Y)+3),font.main=1,cex.main=1,main="c) Adjusted in-sample prediction + \n out-of-sample forecast: output",ylab='$',cex.axis=1,cex.lab=1)
+lines(sim_model$simulation$Y,type="l",col=2,lwd = 2,lty=3)
+legend("topleft",c("Actual","Predicted (adjusted)"),bty="n",cex=1,lty=c(1,3),lwd=c(2,2),col=c(1,2),box.lty=0)
+```
+Gráfico CO real y pronosticado 
+```{r}
+plot(sim_modelData$CO, type="l",col=1,lwd = 2,lty=1,xlim=range(1960,2030),ylim=range(0,max(sim_model$simulation$CO)+3),font.main=1,cex.main=1,main="d) Adjusted in-sample prediction + \n out-of-sample forecast: consumption",ylab='$',cex.axis=1,cex.lab=1)
+lines(sim_model$simulation$CO,type="l",col=3,lwd = 2,lty=3)
+legend("topleft",c("Actual","Predicted (adjusted)"),bty="n",cex=1,lty=c(1,3),lwd=c(2,2),col=c(1,3),box.lty=0)
+```
+
+## PARTE 3
+
+
+### D) UTILICE EL MODELO PARA CALCULAR LOS MULTIPLICADORES
+
+Obtener matriz multiplicadora en 2001
+```{r}
+sim_model=MULTMATRIX(sim_model,
+                     TSRANGE=c(2001,1,2001,1),
+                     INSTRUMENT=c('G','w'),
+                     TARGET=c('CO','Y'),
+                     simIterLimit = 100)
+```
+Mostrar la matriz multiplicadora en 2001
+```{r}
+sim_model$MultiplierMatrix
+```
+Obtener multiplicadores intermedios multiperíodo
+```{r}
+sim_model <- MULTMATRIX(sim_model,
+                        TSRANGE=c(2000,1,2002,1),
+                        INSTRUMENT=c('G','w'),
+                        TARGET=c('CO','Y'))
+```
+Mostrar la matriz de multiplicadores del producto
+```{r}
+sim_model$MultiplierMatrix
+```
+
+
+### E) REALIZAR ENDOGENOUS TARGETING
+
+Create lista de valores arbitrarios para el producto en 2002-2005
+```{r}
+sim_modelTargets = list(
+  Y=TIMESERIES(15,15.5,16,16.5,17,START=c(2002,1),FREQ=1))
+```
+Simular el nuevo modelo
+```{r}
+sim_model=RENORM(sim_model
+                 ,INSTRUMENT = c('G')     
+                 ,TARGET = sim_modelTargets
+                 ,TSRANGE = c(2002,1,2005,1)
+                 ,simIterLimit=100)
+```
+Nota: necesita tantos instrumentos como objetivos
+
+Verificar que se alcancen los objetivos
+`with(sim_model$simulation, TABIT(Y))`
+
+Gráfico variables objetivo simuladas contra series temporales
+```{r}
+plot(sim_modelData$Y, type="h",col="plum",lwd = 4,xlim=range(1960,2010),font.main=1,cex.main=1,main="e) Output: actual vs. target",ylab='$',cex.axis=1,cex.lab=1)
+mycol <- rgb(0, 255, 255, max = 255, alpha = 50, names = "mylightblue")
+rect(xleft=2002,xright=2005,ybottom=0,ytop=25,col=mycol,border=NA)
+lines(sim_model$simulation$Y,type="h",col="purple4",lwd = 2)     
+legend("topleft",c("Actual","Targets achieved \n in 2002-2005"),bty="n",cex=1,lwd=c(4,2),col=c("plum","purple4"),box.lty=0)
+```
+Gráfico variables objetivo simuladas contra series temporales
+```{r}
+plot(sim_modelData$CO, type="h",col="seagreen1",lwd = 4,xlim=range(1960,2010),font.main=1,cex.main=1,main="d) Consumption: actual vs. target",ylab='$',cex.axis=1,cex.lab=1)
+mycol <- rgb(0, 255, 255, max = 255, alpha = 50, names = "mylightblue")
+rect(xleft=2002,xright=2005,ybottom=0,ytop=25,col=mycol,border=NA)
+lines(sim_model$simulation$CO,type="h",col="royalblue4",lwd = 2)     
+legend("topleft",c("Actual","Implied levels \n in 2002-2005"),bty="n",cex=1,lwd=c(4,2),col=c("seagreen1","royalblue4"),box.lty=0)
+```
+
+
+# Referencias
+
+Godley, Wynne y Marc Lavoie. 2007. Economía monetaria: un enfoque integrado del crédito, el dinero, el ingreso, la producción y la riqueza. Palgrave Macmillan.
